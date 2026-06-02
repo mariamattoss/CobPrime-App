@@ -43,11 +43,16 @@ export default function Pagamento() {
       maximumFractionDigits: 2
     });
 
+  const codigoCliente = cliente.Codigo || cliente.IdCliente || '--';
+  const dataVencimento = parcela.DataVencimento
+    ? new Date(parcela.DataVencimento).toLocaleDateString('pt-BR')
+    : '--';
+
   const mensagem = `*Segue seu link de pagamento PIX*
 
-Cód: ${cliente.Codigo} - ${cliente.Nome}
+Cód: ${codigoCliente} - ${cliente.Nome}
 
-Parcela: ${parcela.Numero} - Vencimento: ${parcela.DataVencimento}
+Parcela: ${parcela.Numero} - Vencimento: ${dataVencimento}
 
 Valor: ${valorFormatado}
 
@@ -82,12 +87,12 @@ const realizarBaixa = async (parcela) => {
 
     if (response.data?.sucesso) {
 
-      alert('Pagamento baixado com sucesso2');
+      alert(`Baixa realizada com sucesso! ${response.data?.mensagem}`);
 
-      // Atualiza lista
+      // Atualiza lista usando o identificador único da parcela
       setParcelas((prev) =>
         prev.map((p) =>
-          p.Numero === parcela.Numero
+          p.IdParcela === parcela.IdParcela
             ? {
                 ...p,
                 statuspgto: 'PAGO'
@@ -100,7 +105,7 @@ const realizarBaixa = async (parcela) => {
 
       alert(
         response.data?.mensagem ||
-        'Erro ao realizar baixa2'
+        'Erro ao realizar baixa'
       );
 
     }
@@ -279,7 +284,7 @@ const realizarBaixa = async (parcela) => {
         <div className="px-3">Nenhuma parcela encontrada para este cliente.</div>
       ) : (
         parcelas.map((parcela, index) => (
-          <div className="client-card" key={`${parcela.Numero}-${index}`}>
+          <div className="client-card" key={parcela.IdParcela || `${parcela.Numero}-${index}`}>
             <div style={{ fontSize: '0.85rem' }}>
               <div>
                 <strong>Tipo:</strong> {parcela.Descricao}

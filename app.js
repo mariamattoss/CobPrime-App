@@ -137,7 +137,7 @@ app.get('/home/:idcobrador', async (req, res) => {
 
             return res.status(404).json({
                 sucesso: false,
-                mensagem: 'Cobrador nao encontrado'
+                mensagem: 'Cobrador não encontrado'
             });
 
         }
@@ -158,7 +158,7 @@ app.get('/home/:idcobrador', async (req, res) => {
 
             return res.status(404).json({
                 sucesso: false,
-                mensagem: 'Cobrança nao encontrada'
+                mensagem: 'Cobrança não encontrada'
             });
 
         }
@@ -180,7 +180,7 @@ app.get('/home/:idcobrador', async (req, res) => {
 
             return res.status(404).json({
                 sucesso: false,
-                mensagem: 'Cobrança nao encontrada'
+                mensagem: 'Cobrança não encontrada'
             });
 
         }
@@ -334,7 +334,7 @@ app.get('/parcelas/:idcobranca/:idcliente', async (req, res) => {
                 Numero,
                 DataVencimento,
                 ValorVencimento,
-                IIF(ISNULL(DataPagamento), "EM ABERTO", "PAGO") AS statuspgto,
+                DataPagamento,
                 Fone1,
                 LinkQRCode,
                 IdParcela,
@@ -347,12 +347,22 @@ app.get('/parcelas/:idcobranca/:idcliente', async (req, res) => {
             AND IdCobranca = ${idcobranca}
         `);
 
+        const parcelasNormalizadas = parcelas.map((p) => {
+          const dataPagamento = p.DataPagamento;
+          const estaPaga = dataPagamento && new Date(dataPagamento).getTime() !== 0;
+
+          return {
+            ...p,
+            statuspgto: estaPaga ? 'PAGO' : 'EM ABERTO'
+          };
+        });
+
         // Parcelas não encontradas
-        if(parcelas.length === 0) {
+        if(parcelasNormalizadas.length === 0) {
 
             return res.status(404).json({
                 sucesso: false,
-                mensagem: 'Parcelas não encontrado'
+                mensagem: 'Parcelas não encontradas'
             });
 
         }
@@ -362,7 +372,7 @@ app.get('/parcelas/:idcobranca/:idcliente', async (req, res) => {
 
             sucesso: true,
 
-            parcelas: parcelas
+            parcelas: parcelasNormalizadas
 
         });
 
@@ -414,33 +424,60 @@ app.post('/baixa-pagamento', async (req, res) => {
         if (parcela.length === 0) {
             return res.status(404).json({
                 sucesso: false,
-                mensagem: 'Parcela nao encontrada'
+                mensagem: 'Parcela não encontrada'
             });
         }
 
         // verifica se já foi paga
-        if (parcela[0].DataPagamento) {
+        const dataPagamento = parcela[0]. DataPagamento;
+        const parcelaEstaPaga = dataPagamento && new Date(dataPagamento).getTime() !== 0;
+
+        if (parcelaEstaPaga) {
             return res.status(400).json({
                 sucesso: false,
-                mensagem: 'Parcela ja esta paga'
+                mensagem: 'Parcela ja está paga'
             });
         }
 
         // BAIXA O PAGAMENTO
-        // Mudança essencial: Usando Date() nativo do Access para evitar conflito de formatos de string
-        await connection.execute(`
+        // Uso Date() nativo do Access
+        const pagamento = await connection.execute(`
             UPDATE CobrancasParcelas
             SET
                 DataPagamento = Date(),
-                PagApp = True
+                PagApp = -1
             WHERE IdCliente = ${idcliente}
             AND IdCobranca = ${idcobranca}
             AND IdParcela = ${idparcela}
         `);
 
+        if (pagamento.rowsAffected === 0) {
+            return res.status(500).json({
+                sucesso: false,
+                mensagem: 'Falha ao atualizar a parcela. Nenhuma linha foi afetada.'
+            });
+        }
+
+        // Verifica se a atualização foi aplicada e retorna a parcela atualizada
+        const parcelaAtualizada = await connection.query(`
+            SELECT IdParcela, DataPagamento, PagApp
+            FROM CobrancasParcelas
+            WHERE IdCliente = ${idcliente}
+            AND IdCobranca = ${idcobranca}
+            AND IdParcela = ${idparcela}
+        `);
+
+        if (parcelaAtualizada.length === 0) {
+            return res.status(404).json({
+                sucesso: false,
+                mensagem: 'Parcela atualizada não encontrada'
+            });
+        }
+        
         res.json({
             sucesso: true,
-            mensagem: 'Pagamento baixado com sucesso'
+            mensagem: `Baixa realizada com sucesso ${idcliente}...`,
+            parcela: parcelaAtualizada[0]
         });
 
     } catch (erro) {
