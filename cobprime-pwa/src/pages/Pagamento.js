@@ -12,7 +12,8 @@ export default function Pagamento() {
   const { idcobranca, idcliente } = useParams();
   const navigate = useNavigate();
 
-  const URL_PAZ_NO_VALE = 'https://paznovale.com.br/pagamento-pix/?idPix=';
+  // [FIX]: Mantem a URL base sem query para nao gerar ?idPix=?idPix=...
+  const URL_PAZ_NO_VALE = 'https://paznovale.com.br/pagamento-pix/';
 
   const [parcelas, setParcelas] = useState([]);
   const [cliente, setCliente] = useState({ IdCliente: '', Nome: '', Fone1: '', CPF: '' });
@@ -22,6 +23,11 @@ export default function Pagamento() {
   const [erro, setErro] = useState('');
 // LINK DE PAGAMENTO
  const enviarWhatsApp = (parcela) => {
+
+  if (parcela.statuspgto === 'PAGO') {
+    alert('Parcela ja esta paga.');
+    return;
+  }
 
   if (!cliente.Fone1) {
     alert('WhatsApp indisponível: telefone do cliente não encontrado.');
@@ -35,7 +41,8 @@ export default function Pagamento() {
 
   const idPix = parcela.LinkQRCode.slice(-32);
 
-  const linkPagamento = `${URL_PAZ_NO_VALE}?idPix=${idPix}`;
+  // [FIX]: Codifica o idPix antes de montar o link enviado ao cliente.
+  const linkPagamento = `${URL_PAZ_NO_VALE}?pix=${encodeURIComponent(idPix)}`;
 
   const valorFormatado = Number(parcela.ValorVencimento)
     .toLocaleString('pt-BR', {
@@ -67,6 +74,12 @@ ${linkPagamento}`;
 // BAIXA DE PAGAMENTO
 const realizarBaixa = async (parcela) => {
 
+  // [FIX]: Bloqueia tentativa de baixa duplicada ja no frontend.
+  if (parcela.statuspgto === 'PAGO') {
+    alert('Parcela ja esta paga.');
+    return;
+  }
+
   // Confirmação
   const confirmar = window.confirm(
     `Deseja realizar a baixa da parcela ${parcela.Numero}?`
@@ -79,13 +92,31 @@ const realizarBaixa = async (parcela) => {
     const response = await api.post(
       '/baixa-pagamento',
       {
-        idcliente: cliente.IdCliente,
-        idcobranca: parcela.IdCobranca,
+        // [FIX]: Usa os IDs validados pela rota da tela, nao valores possivelmente atrasados do estado.
+        idcliente: idcliente,
+        idcobranca: idcobranca,
         idparcela: parcela.IdParcela
       }
     );
 
-    if (response.data?.sucesso) {
+    const parcelaConfirmada = response.data?.parcela;
+    // [FIX]: Confere os campos persistidos retornados pelo backend antes de marcar PAGO na interface.
+    const dataPagamentoConfirmada =
+      parcelaConfirmada?.DataPagamento &&
+      new Date(parcelaConfirmada.DataPagamento).getTime() !== 0;
+
+    const pagAppConfirmado =
+      parcelaConfirmada?.PagApp === true ||
+      parcelaConfirmada?.PagApp === -1 ||
+      parcelaConfirmada?.PagApp === 'True' ||
+      parcelaConfirmada?.PagApp === 'true';
+
+    if (
+      response.data?.sucesso &&
+      parcelaConfirmada?.IdParcela === parcela.IdParcela &&
+      dataPagamentoConfirmada &&
+      pagAppConfirmado
+    ) {
 
       alert(`Baixa realizada com sucesso! ${response.data?.mensagem}`);
 
@@ -95,6 +126,8 @@ const realizarBaixa = async (parcela) => {
           p.IdParcela === parcela.IdParcela
             ? {
                 ...p,
+                // [FIX]: Atualiza o estado local com os dados confirmados no banco.
+                ...parcelaConfirmada,
                 statuspgto: 'PAGO'
               }
             : p
@@ -105,7 +138,7 @@ const realizarBaixa = async (parcela) => {
 
       alert(
         response.data?.mensagem ||
-        'Erro ao realizar baixa'
+        'Baixa retornou sem confirmacao de persistencia no banco.'
       );
 
     }
@@ -324,13 +357,28 @@ const realizarBaixa = async (parcela) => {
 
           
             <div className="action-icons">
-              <FaWhatsapp 
-                className="icon-whatsapp" 
-                onClick={() => enviarWhatsApp(parcela)}
+              <FaWhatsapp
+                className={`icon-whatsapp ${parcela.statuspgto === 'PAGO' ? 'disabled' : ''}`}
+                onClick={() => {
+                  if (parcela.statuspgto !== 'PAGO') enviarWhatsApp(parcela);
+                }}
+                title={parcela.statuspgto === 'PAGO' ? 'Parcela ja paga' : 'Enviar link pelo WhatsApp'}
+                style={{
+                  opacity: parcela.statuspgto === 'PAGO' ? 0.45 : 1,
+                  pointerEvents: parcela.statuspgto === 'PAGO' ? 'none' : 'auto'
+                }}
               />
+              {/* [FIX]: Impede que parcela ja paga dispare nova baixa pela UI. */}
               <FaCoins
-                className="icon-coin"
-                onClick={() => realizarBaixa(parcela)}
+                className={`icon-coin ${parcela.statuspgto === 'PAGO' ? 'disabled' : ''}`}
+                onClick={() => {
+                  if (parcela.statuspgto !== 'PAGO') realizarBaixa(parcela);
+                }}
+                title={parcela.statuspgto === 'PAGO' ? 'Parcela ja paga' : 'Realizar baixa'}
+                style={{
+                  opacity: parcela.statuspgto === 'PAGO' ? 0.45 : 1,
+                  pointerEvents: parcela.statuspgto === 'PAGO' ? 'none' : 'auto'
+                }}
               />
             </div>
           </div>

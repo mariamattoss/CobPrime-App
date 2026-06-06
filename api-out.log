@@ -1,0 +1,11 @@
+
+> testeaccess@1.0.0 start
+> node app.js
+
+Servidor rodando em http://localhost:3000
+[BAIXA_PAGAMENTO][INICIO] {
+  rota: '/baixa-pagamento',
+  inicio: '2026-06-05T14:46:53.598Z',
+  payload: { idcliente: 999999999, idcobranca: 999999999, idparcela: 999999999 },
+  idcobrador: '1'
+}

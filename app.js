@@ -5,8 +5,22 @@ const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+// [FIX]: Restringe CORS em vez de aceitar qualquer origem; CORS_ORIGIN permite configurar producao.
+const origensPermitidas = [
+    'http://localhost:3001',
+    'http://127.0.0.1:3001',
+    process.env.CORS_ORIGIN
+].filter(Boolean);
 
-app.use(cors());
+app.use(cors({
+    origin(origin, callback) {
+        if (!origin || origensPermitidas.includes(origin)) {
+            return callback(null, true);
+        }
+
+        return callback(new Error('Origem nao permitida pelo CORS'));
+    }
+}));
 app.use(express.json());
 
 const banco = path.join(__dirname, 'banco', 'banco_dev.mdb');
@@ -23,6 +37,21 @@ function numeroValido(valor) {
     return /^\d+$/.test(String(valor || ''));
 }
 
+// [FIX]: Exige identificacao do cobrador no backend para impedir baixa sem vinculo minimo com o usuario logado.
+function exigirCobrador(req, res, next) {
+    const idcobrador = req.headers['x-id-cobrador'];
+
+    if (!numeroValido(idcobrador)) {
+        return res.status(401).json({
+            sucesso: false,
+            mensagem: 'Cobrador nao autenticado'
+        });
+    }
+
+    req.idcobrador = idcobrador;
+    next();
+}
+
 // USUARIOS
 app.get('/Usuarios', async (req, res) => {
 
@@ -36,8 +65,11 @@ app.get('/Usuarios', async (req, res) => {
 
     } catch (erro) {
 
+        console.error('[USUARIOS][ERRO_INTERNO]', erro);
+
         res.status(500).json({
-            erro: erro.message
+            // [FIX]: Nao expoe detalhes internos do banco para o cliente.
+            mensagem: 'Erro interno ao carregar usuarios.'
         });
 
     }
@@ -51,12 +83,15 @@ app.post('/login', async (req, res) => {
     try {
 
         const { login, senha } = req.body;
+        // [FIX]: Escapa aspas simples antes de interpolar credenciais no SQL do Access.
+        const loginSeguro = escaparTextoSql(login);
+        const senhaSegura = escaparTextoSql(senha);
 
         const resultado = await connection.query(`
             SELECT *
             FROM Usuarios
-            WHERE login='${login}'
-            AND senha='${senha}'
+            WHERE login='${loginSeguro}'
+            AND senha='${senhaSegura}'
         `);
 
         if(resultado.length === 0) {
@@ -96,8 +131,11 @@ app.post('/login', async (req, res) => {
 
     } catch (erro) {
 
+        console.error('[LOGIN][ERRO_INTERNO]', erro);
+
         res.status(500).json({
-            erro: erro.message
+            // [FIX]: Nao expoe detalhes internos do banco para o cliente.
+            mensagem: 'Erro interno ao realizar login.'
         });
 
     }
@@ -222,7 +260,8 @@ app.get('/home/:idcobrador', async (req, res) => {
         console.error(erro);
 
         res.status(500).json({
-            erro: erro.message
+            // [FIX]: Nao expoe detalhes internos do banco para o cliente.
+            mensagem: 'Erro interno ao carregar home.'
         });
 
     }
@@ -238,28 +277,32 @@ app.get('/cliente/:idcobranca/:idcliente', async (req, res) => {
         const idcliente = req.params.idcliente;
         const idcobranca = req.params.idcobranca;
 
-        if(!numeroValido(idcliente)) {
+        // [FIX]: Valida tambem IdCobranca para nao carregar cliente fora do contexto da cobranca.
+        if(!numeroValido(idcliente) || !numeroValido(idcobranca)) {
 
             return res.status(400).json({
                 sucesso: false,
-                mensagem: 'IdCliente invalido'
+                mensagem: 'IdCliente ou IdCobranca invalido'
             });
 
         }
 
-        // consulta
+        // [FIX]: Consulta o cliente somente se existir parcela dele na cobranca informada.
         const cliente = await connection.query(`
 
-            SELECT 
+            SELECT DISTINCT
 
-                IdCliente,
-                Nome,
-                Fone1,
-                CPF
+                c.IdCliente,
+                c.Nome,
+                c.Fone1,
+                c.CPF
 
-            FROM Clientes 
+            FROM Clientes AS c
+            INNER JOIN CobrancasParcelas AS cp
+                ON cp.IdCliente = c.IdCliente
 
-            WHERE IdCliente = ${idcliente}
+            WHERE c.IdCliente = ${idcliente}
+            AND cp.IdCobranca = ${idcobranca}
 
         `);
 
@@ -288,7 +331,114 @@ app.get('/cliente/:idcobranca/:idcliente', async (req, res) => {
         console.error(erro);
 
         res.status(500).json({
-            erro: erro.message
+            // [FIX]: Nao expoe detalhes internos do banco para o cliente.
+            mensagem: 'Erro interno ao carregar cliente.'
+        });
+
+    }
+
+});
+
+// ROTA ATUALIZA INFO CLIENTE
+app.put('/cliente/:idcobranca/:idcliente', exigirCobrador, async (req, res) => {
+
+    try {
+
+        const idcliente = req.params.idcliente;
+        const idcobranca = req.params.idcobranca;
+        const { fone1, cpf } = req.body;
+
+        if(!numeroValido(idcliente) || !numeroValido(idcobranca)) {
+
+            return res.status(400).json({
+                sucesso: false,
+                mensagem: 'IdCliente ou IdCobranca invalido'
+            });
+
+        }
+
+        const cobrancaAutorizada = await connection.query(`
+            SELECT IdCobranca
+            FROM Cobrancas
+            WHERE IdCobranca = ${idcobranca}
+            AND IdCobrador = ${req.idcobrador}
+        `);
+
+        if (cobrancaAutorizada.length === 0) {
+            return res.status(403).json({
+                sucesso: false,
+                mensagem: 'Cobranca nao autorizada para este cobrador'
+            });
+        }
+
+        const clienteExiste = await connection.query(`
+            SELECT DISTINCT c.IdCliente
+            FROM Clientes AS c
+            INNER JOIN CobrancasParcelas AS cp
+                ON cp.IdCliente = c.IdCliente
+            WHERE c.IdCliente = ${idcliente}
+            AND cp.IdCobranca = ${idcobranca}
+        `);
+
+        if (clienteExiste.length === 0) {
+            return res.status(404).json({
+                sucesso: false,
+                mensagem: 'Cliente nao encontrado nesta cobranca'
+            });
+        }
+
+        const foneSeguro = escaparTextoSql(String(fone1 || '').replace(/\D/g, ''));
+        const cpfSeguro = escaparTextoSql(String(cpf || '').replace(/\D/g, ''));
+
+        await connection.execute(`
+            UPDATE Clientes
+            SET
+                Fone1 = '${foneSeguro}',
+                CPF = '${cpfSeguro}'
+            WHERE IdCliente = ${idcliente}
+        `);
+
+        await connection.execute(`
+            UPDATE CobrancasParcelas
+            SET
+                Fone1 = '${foneSeguro}'
+            WHERE IdCliente = ${idcliente}
+            AND IdCobranca = ${idcobranca}
+        `);
+
+        const clienteAtualizado = await connection.query(`
+            SELECT DISTINCT
+                c.IdCliente,
+                c.Nome,
+                c.Fone1,
+                c.CPF
+            FROM Clientes AS c
+            INNER JOIN CobrancasParcelas AS cp
+                ON cp.IdCliente = c.IdCliente
+            WHERE c.IdCliente = ${idcliente}
+            AND cp.IdCobranca = ${idcobranca}
+        `);
+
+        if (clienteAtualizado.length === 0) {
+            return res.status(500).json({
+                sucesso: false,
+                mensagem: 'Cliente atualizado nao foi localizado'
+            });
+        }
+
+        return res.json({
+            sucesso: true,
+            mensagem: 'Cliente atualizado com sucesso',
+            cliente: clienteAtualizado[0]
+        });
+
+    } catch (erro) {
+
+        console.error('[CLIENTE_UPDATE][ERRO_INTERNO]', erro);
+
+        res.status(500).json({
+            sucesso: false,
+            mensagem: 'Erro interno ao atualizar cliente.'
         });
 
     }
@@ -381,7 +531,8 @@ app.get('/parcelas/:idcobranca/:idcliente', async (req, res) => {
         console.error(erro);
 
         res.status(500).json({
-            erro: erro.message
+            // [FIX]: Nao expoe detalhes internos do banco para o cliente.
+            mensagem: 'Erro interno ao carregar parcelas.'
         });
 
     }
@@ -389,7 +540,12 @@ app.get('/parcelas/:idcobranca/:idcliente', async (req, res) => {
 });
 
 // ROTA BAIXA PAGAMENTO
-app.post('/baixa-pagamento', async (req, res) => {
+app.post('/baixa-pagamento', exigirCobrador, async (req, res) => {
+
+    const auditoria = {
+        rota: '/baixa-pagamento',
+        inicio: new Date().toISOString()
+    };
 
     try {
         const {
@@ -398,15 +554,38 @@ app.post('/baixa-pagamento', async (req, res) => {
             idparcela
         } = req.body;
 
+        auditoria.payload = { idcliente, idcobranca, idparcela };
+        auditoria.idcobrador = req.idcobrador;
+        console.log('[BAIXA_PAGAMENTO][INICIO]', auditoria);
+
         // validações
         if (
             !numeroValido(idcliente) ||
             !numeroValido(idcobranca) ||
             !numeroValido(idparcela)
         ) {
+            console.warn('[BAIXA_PAGAMENTO][PARAMETROS_INVALIDOS]', auditoria);
+
             return res.status(400).json({
                 sucesso: false,
                 mensagem: 'Dados invalidos'
+            });
+        }
+
+        // [FIX]: Confirma que a cobranca pertence ao cobrador autenticado antes de permitir a baixa.
+        const cobrancaAutorizada = await connection.query(`
+            SELECT IdCobranca
+            FROM Cobrancas
+            WHERE IdCobranca = ${idcobranca}
+            AND IdCobrador = ${req.idcobrador}
+        `);
+
+        if (cobrancaAutorizada.length === 0) {
+            console.warn('[BAIXA_PAGAMENTO][COBRANCA_NAO_AUTORIZADA]', auditoria);
+
+            return res.status(403).json({
+                sucesso: false,
+                mensagem: 'Cobranca nao autorizada para este cobrador'
             });
         }
 
@@ -421,7 +600,15 @@ app.post('/baixa-pagamento', async (req, res) => {
             AND IdParcela = ${idparcela}
         `);
 
+        console.log('[BAIXA_PAGAMENTO][PARCELA_ANTES_UPDATE]', {
+            ...auditoria,
+            parcelaEncontrada: parcela.length > 0,
+            parcela: parcela[0] || null
+        });
+
         if (parcela.length === 0) {
+            console.warn('[BAIXA_PAGAMENTO][PARCELA_NAO_ENCONTRADA]', auditoria);
+
             return res.status(404).json({
                 sucesso: false,
                 mensagem: 'Parcela não encontrada'
@@ -433,6 +620,11 @@ app.post('/baixa-pagamento', async (req, res) => {
         const parcelaEstaPaga = dataPagamento && new Date(dataPagamento).getTime() !== 0;
 
         if (parcelaEstaPaga) {
+            console.warn('[BAIXA_PAGAMENTO][PARCELA_JA_PAGA]', {
+                ...auditoria,
+                dataPagamento
+            });
+
             return res.status(400).json({
                 sucesso: false,
                 mensagem: 'Parcela ja está paga'
@@ -441,7 +633,9 @@ app.post('/baixa-pagamento', async (req, res) => {
 
         // BAIXA O PAGAMENTO
         // Uso Date() nativo do Access
-        const pagamento = await connection.execute(`
+
+        // [FIX]: O UPDATE exige parcela em aberto para reduzir sucesso indevido em corrida.
+        const sqlUpdate = `
             UPDATE CobrancasParcelas
             SET
                 DataPagamento = Date(),
@@ -449,14 +643,17 @@ app.post('/baixa-pagamento', async (req, res) => {
             WHERE IdCliente = ${idcliente}
             AND IdCobranca = ${idcobranca}
             AND IdParcela = ${idparcela}
-        `);
+            AND (DataPagamento IS NULL OR DataPagamento = 0)
+        `;
 
-        if (pagamento.rowsAffected === 0) {
-            return res.status(500).json({
-                sucesso: false,
-                mensagem: 'Falha ao atualizar a parcela. Nenhuma linha foi afetada.'
-            });
-        }
+        console.log('[BAIXA_PAGAMENTO][ANTES_UPDATE]', {
+            ...auditoria,
+            sql: sqlUpdate
+        });
+
+        await connection.execute(sqlUpdate);
+
+        console.log('[BAIXA_PAGAMENTO][DEPOIS_UPDATE]', auditoria);
 
         // Verifica se a atualização foi aplicada e retorna a parcela atualizada
         const parcelaAtualizada = await connection.query(`
@@ -467,27 +664,73 @@ app.post('/baixa-pagamento', async (req, res) => {
             AND IdParcela = ${idparcela}
         `);
 
+        console.log('[BAIXA_PAGAMENTO][PARCELA_APOS_UPDATE]', {
+            ...auditoria,
+            parcelaEncontrada: parcelaAtualizada.length > 0,
+            parcela: parcelaAtualizada[0] || null
+        });
+
         if (parcelaAtualizada.length === 0) {
+            console.error('[BAIXA_PAGAMENTO][PARCELA_SUMIU_APOS_UPDATE]', auditoria);
+
             return res.status(404).json({
                 sucesso: false,
                 mensagem: 'Parcela atualizada não encontrada'
             });
         }
         
+        const baixaConfirmada = parcelaAtualizada[0];
+        // [FIX]: Confirma persistencia real no MDB em vez de confiar em rowsAffected do node-adodb.
+        const dataPagamentoConfirmada =
+            baixaConfirmada.DataPagamento &&
+            new Date(baixaConfirmada.DataPagamento).getTime() !== 0;
+
+        const pagAppConfirmado =
+            baixaConfirmada.PagApp === true ||
+            baixaConfirmada.PagApp === -1 ||
+            baixaConfirmada.PagApp === 'True' ||
+            baixaConfirmada.PagApp === 'true';
+
+        if (!dataPagamentoConfirmada || !pagAppConfirmado) {
+            console.error('[BAIXA_PAGAMENTO][PERSISTENCIA_NAO_CONFIRMADA]', {
+                ...auditoria,
+                dataPagamentoConfirmada,
+                pagAppConfirmado,
+                parcela: baixaConfirmada
+            });
+
+            return res.status(500).json({
+                sucesso: false,
+                mensagem: 'Baixa nao confirmada no banco de dados.',
+                parcela: baixaConfirmada
+            });
+        }
+
+        console.log('[BAIXA_PAGAMENTO][SUCESSO_CONFIRMADO]', {
+            ...auditoria,
+            parcela: baixaConfirmada,
+            fim: new Date().toISOString()
+        });
+
         res.json({
             sucesso: true,
             mensagem: `Baixa realizada com sucesso ${idcliente}...`,
-            parcela: parcelaAtualizada[0]
+            parcela: baixaConfirmada
         });
 
     } catch (erro) {
         // Log detalhado no console do servidor para te ajudar no debug
-        console.error("Erro interno na rota /baixa-pagamento:", erro);
+        console.error("[BAIXA_PAGAMENTO][ERRO_INTERNO]", {
+            ...auditoria,
+            erro: erro.message,
+            stack: erro.stack,
+            fim: new Date().toISOString()
+        });
 
         res.status(500).json({
             sucesso: false,
-            mensagem: 'Erro interno ao realizar a baixa no banco de dados.',
-            erro: erro.message // Retorna a mensagem exata do driver OLEDB/Access
+            // [FIX]: Nao expoe detalhes internos do driver OLEDB/Access para o cliente.
+            mensagem: 'Erro interno ao realizar a baixa no banco de dados.'
         });
     }
 });
